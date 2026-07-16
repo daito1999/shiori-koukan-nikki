@@ -1,9 +1,19 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import * as api from "./api";
+import { isSupabaseConfigured } from "./supabaseClient";
 
 /* ------------------------------------------------------------------
-   栞交換日記 プロトタイプ v4（要件定義書 準拠）
+   栞交換日記 プロトタイプ v5（Supabase連携）
    『傲慢と善良』（辻村深月）を題材にした、章ごとの感想＋人生観の
    移り変わりを記録・共有するアプリ。
+
+   v5での変更点:
+   - データをSupabase（共有DB）に保存し、誰かが更新すると他の人が
+     開いたとき／開いたままのときも最新の内容が反映されるように
+     （postgres_changesのRealtime購読 + 全件再取得）
+   - members/reviews/answers/reactions/commentsはすべてSupabase由来。
+     取得後は従来どおりのin-memoryな形に組み立て直し、既存のUI
+     コンポーネントは変更なしで動くようにしてある（src/api.js参照）
 
    v4での変更点（要件定義書との差分埋め）:
    - 表示名に加えてアイコン（絵文字アバター）を設定できるように
@@ -11,8 +21,7 @@ import React, { useState, useMemo } from "react";
    - 「自分の変化」を「価値観の推移」に拡張し、メンバーを切り替えて
      他メンバーの回答推移も閲覧可能に（閲覧者自身の既読範囲でネタバレ判定）
    - 投稿フォームで未回答の質問を視覚的に強調
-
-   すべてインメモリ（React state）で完結。リロードで初期化される。
+   - ユーザーの削除（確認ステップあり）
 ------------------------------------------------------------------- */
 
 // ---------- 初期データ ----------
@@ -50,10 +59,6 @@ const QUESTIONS = {
   p2c3: { text: "自分の中にある「傲慢さ」と「善良さ」、どちらが強いと思う？", theme: "傲慢と善良" },
 };
 
-const MEMBERS = ["太郎", "花子"];
-
-const DEFAULT_AVATARS = { 太郎: "🐢", 花子: "🐝" };
-
 const AVATAR_SUGGESTIONS = ["🐢", "🐝", "🦊", "🐧", "🐰", "🐼", "🦉", "🐙", "🐨", "🦋", "🐳", "🦔"];
 
 const EMOJI_SUGGESTIONS = ["📖", "😢", "🤔", "😳", "💭", "🔥", "😮", "🥺"];
@@ -67,95 +72,15 @@ function progressLabel(idx) {
   return `${ch.part}・${ch.label}まで`;
 }
 
-// review: {
+// review（Supabaseから取得後、この形に組み立て直す。src/api.js参照）: {
 //   id, userId, startChapterId, endChapterId, date,
 //   reviewText,
-//   answers: [{ chapterId, text, reactions: [{userId, emoji}] }],   // 範囲内の全章分
+//   answers: [{ id, chapterId, text, reactions: [{userId, emoji}] }],   // 範囲内の全章分
 //   reactions: [{userId, emoji}],       // 投稿全体へのリアクション
 //   comments: [{userId, text, date}],
 //   editedAt: string | null            // 編集済みなら日時
 // }
-const SEED_REVIEWS = [
-  {
-    id: "r0",
-    userId: "太郎",
-    startChapterId: "p0",
-    endChapterId: "p0",
-    date: "2026-06-28",
-    reviewText: "まだ読んでないけど、タイトルからして重そうな話。婚活ものらしいので今から身構えてる。",
-    answers: [
-      {
-        chapterId: "p0",
-        text: "今は結婚願望あまりない。周りが結婚し始めて焦る気持ちはあるけど、妥協はしたくない。",
-        reactions: [],
-      },
-    ],
-    reactions: [],
-    comments: [],
-    editedAt: null,
-  },
-  {
-    id: "r1",
-    userId: "花子",
-    startChapterId: "p1c1",
-    endChapterId: "p1c1",
-    date: "2026-07-01",
-    reviewText:
-      "架の視点から始まって、婚活市場のシビアさがリアル。条件で判断してしまう自分にも心当たりがある……。",
-    answers: [
-      {
-        chapterId: "p1c1",
-        text: "正直、年収と価値観の合う・合わないは見てしまう。でもそれを「傲慢」と言われると耳が痛い。",
-        reactions: [{ userId: "太郎", emoji: "🤔" }],
-      },
-    ],
-    reactions: [{ userId: "太郎", emoji: "🤔" }],
-    comments: [{ userId: "花子", text: "わかる、条件で見るの悪いことじゃないと思うけどね", date: "2026-07-02" }],
-    editedAt: null,
-  },
-  {
-    id: "r2",
-    userId: "太郎",
-    startChapterId: "p1c1",
-    endChapterId: "p1c1",
-    date: "2026-07-02",
-    reviewText: "第一章、思ったよりテンポよく読めた。架がどんな決断をするのか気になる。",
-    answers: [
-      {
-        chapterId: "p1c1",
-        text: "条件はある程度大事だけど、それより「一緒にいて楽か」を重視したい派。",
-        reactions: [],
-      },
-    ],
-    reactions: [],
-    comments: [],
-    editedAt: null,
-  },
-  {
-    id: "r3",
-    userId: "花子",
-    startChapterId: "p1c2",
-    endChapterId: "p1c3",
-    date: "2026-07-05",
-    reviewText:
-      "第二章〜第三章を一気読み。真実の視点が入ってきて、印象がだいぶ変わった。善良さの裏にあるものが見えてくる感じ。",
-    answers: [
-      {
-        chapterId: "p1c2",
-        text: "マッチングアプリ自体には抵抗ないけど、会う前の情報が少なすぎるのは怖いなと思う。",
-        reactions: [],
-      },
-      {
-        chapterId: "p1c3",
-        text: "同棲は必要だと思ってたけど、この章読んでちょっと揺らいだ。一緒に住まなくても分かることもあるのかも。",
-        reactions: [{ userId: "花子", emoji: "😮" }],
-      },
-    ],
-    reactions: [{ userId: "花子", emoji: "😮" }, { userId: "太郎", emoji: "📖" }],
-    comments: [],
-    editedAt: null,
-  },
-];
+// 初期シードデータは supabase/schema.sql 側に用意してある。
 
 // ---------- 小さな汎用コンポーネント ----------
 
@@ -185,21 +110,67 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [newUserName, setNewUserName] = useState("");
   const [newUserAvatar, setNewUserAvatar] = useState(AVATAR_SUGGESTIONS[0]);
-  const [members, setMembers] = useState(MEMBERS);
-  const [avatars, setAvatars] = useState(DEFAULT_AVATARS);
+  const [members, setMembers] = useState([]);
+  const [avatars, setAvatars] = useState({});
   const [confirmDeleteMember, setConfirmDeleteMember] = useState(null);
 
   // 各ユーザーの読書進捗：{ userId: chapterIndex 最後まで読んだ章のindex }
   // index 0 は「読む前」。-1 は「読む前すら未投稿」を意味する。
-  const [progress, setProgress] = useState({
-    花子: 3, // p1c3 まで既読
-    太郎: 1, // p1c1 まで既読
-  });
+  // Supabaseからの取得が終わるまでは空。
+  const [progress, setProgress] = useState({});
 
-  const [reviews, setReviews] = useState(SEED_REVIEWS);
+  const [reviews, setReviews] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [syncError, setSyncError] = useState(null);
   const [view, setView] = useState("timeline"); // timeline | byMember | post | valueShift
   const [openReviewId, setOpenReviewId] = useState(null);
   const [valueShiftMember, setValueShiftMember] = useState(null);
+
+  // Supabaseから全データを取得し直して画面に反映する。
+  // 自分の投稿・リアクション操作の直後と、他メンバーの変更を検知した
+  // Realtimeイベントの両方からこの関数を呼ぶ。
+  const refresh = useCallback(async () => {
+    try {
+      const data = await api.fetchAll();
+      setMembers(data.members);
+      setAvatars(data.avatars);
+      setProgress(data.progress);
+      setReviews(data.reviews);
+      setSyncError(null);
+      return data;
+    } catch (err) {
+      console.error(err);
+      setSyncError(
+        err?.message?.includes("未設定")
+          ? err.message
+          : "データの取得・保存に失敗しました。通信状況を確認し、しばらくしてからやり直してください。"
+      );
+      return null;
+    }
+  }, []);
+
+  // Realtime購読で複数のテーブル変更イベントがまとめて届いても、
+  // 再取得は1回にまとめる（連投コメント等での過剰リクエストを防ぐ）。
+  const refreshTimer = useRef(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => {
+      refresh();
+    }, 300);
+  }, [refresh]);
+
+  useEffect(() => {
+    let active = true;
+    refresh().finally(() => {
+      if (active) setLoading(false);
+    });
+    const unsubscribe = api.subscribeToChanges(() => scheduleRefresh());
+    return () => {
+      active = false;
+      unsubscribe();
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    };
+  }, [refresh, scheduleRefresh]);
 
   // 編集中のreview id。nullなら新規投稿モード。
   const [editingReviewId, setEditingReviewId] = useState(null);
@@ -251,52 +222,30 @@ export default function App() {
     setView("post");
   }
 
-  function deleteReview(reviewId) {
-    setReviews((rs) => rs.filter((r) => r.id !== reviewId));
+  async function deleteReview(reviewId) {
     if (openReviewId === reviewId) setOpenReviewId(null);
+    await api.deleteReview(reviewId);
+    await refresh();
   }
 
-  function handleRegister() {
+  async function handleRegister() {
     const name = newUserName.trim();
     if (!name) return;
     if (!members.includes(name)) {
-      setMembers([...members, name]);
-      setProgress({ ...progress, [name]: -1 });
-      setAvatars((a) => ({ ...a, [name]: newUserAvatar }));
+      await api.registerMember(name, newUserAvatar);
     }
     setNewUserName("");
     handleLogin(name);
+    await refresh();
   }
 
-  // メンバーを削除する。本人の投稿は削除し、他メンバーの投稿に残る
-  // リアクション・コメントも整理して、削除済みユーザーへの参照を残さない。
-  function deleteMember(name) {
-    setMembers((ms) => ms.filter((m) => m !== name));
-    setAvatars((a) => {
-      const rest = { ...a };
-      delete rest[name];
-      return rest;
-    });
-    setProgress((p) => {
-      const rest = { ...p };
-      delete rest[name];
-      return rest;
-    });
-    setReviews((rs) =>
-      rs
-        .filter((r) => r.userId !== name)
-        .map((r) => ({
-          ...r,
-          reactions: r.reactions.filter((x) => x.userId !== name),
-          comments: r.comments.filter((c) => c.userId !== name),
-          answers: r.answers.map((a) => ({
-            ...a,
-            reactions: (a.reactions || []).filter((x) => x.userId !== name),
-          })),
-        }))
-    );
+  // メンバーを削除する。本人の投稿と、他メンバーの投稿に残る本人の
+  // リアクション・コメントは、DB側のON DELETE CASCADEで自動的に整理される。
+  async function deleteMember(name) {
     if (valueShiftMember === name) setValueShiftMember(null);
     setConfirmDeleteMember(null);
+    await api.deleteMember(name);
+    await refresh();
   }
 
   const rangeChapterIds = useMemo(() => {
@@ -308,115 +257,59 @@ export default function App() {
     rangeChapterIds.length > 0 &&
     rangeChapterIds.every((cid) => (formAnswers[cid] || "").trim().length > 0);
 
-  function submitReview() {
+  async function submitReview() {
     if (!formReview.trim() || !allAnswersFilled) return;
     const startChapterId = BOOK.chapters[formStartIndex].id;
     const endChapterId = BOOK.chapters[formEndIndex].id;
     const editingSource = editingReviewId ? reviews.find((r) => r.id === editingReviewId) : null;
-
-    // 編集時は、章ごとの既存リアクションを維持したまま本文だけ差し替える
-    const answers = rangeChapterIds.map((cid) => {
-      const prevAnswer = editingSource?.answers.find((a) => a.chapterId === cid);
-      return {
-        chapterId: cid,
-        text: formAnswers[cid].trim(),
-        reactions: prevAnswer?.reactions || [],
-      };
-    });
+    const answers = rangeChapterIds.map((cid) => ({ chapterId: cid, text: formAnswers[cid].trim() }));
 
     if (editingReviewId) {
-      // 編集モード：既存reviewを更新し、リアクション・コメントは維持する
-      setReviews((rs) =>
-        rs.map((r) =>
-          r.id === editingReviewId
-            ? {
-                ...r,
-                startChapterId,
-                endChapterId,
-                date: formDate,
-                reviewText: formReview.trim(),
-                answers,
-                editedAt: new Date().toISOString().slice(0, 10),
-              }
-            : r
-        )
-      );
-    } else {
-      const newReview = {
-        id: "r" + Date.now(),
-        userId: currentUser,
+      await api.updateReview(editingReviewId, {
         startChapterId,
         endChapterId,
         date: formDate,
         reviewText: formReview.trim(),
         answers,
-        reactions: [],
-        comments: [],
-        editedAt: null,
-      };
-      setReviews([newReview, ...reviews]);
+        existingAnswers: editingSource?.answers || [],
+      });
+    } else {
+      await api.createReview({
+        userName: currentUser,
+        startChapterId,
+        endChapterId,
+        date: formDate,
+        reviewText: formReview.trim(),
+        answers,
+      });
     }
 
-    setProgress((p) => ({
-      ...p,
-      [currentUser]: Math.max(p[currentUser] ?? -1, formEndIndex),
-    }));
+    await api.bumpProgress(currentUser, formEndIndex);
     resetFormToNext();
     setView("timeline");
+    await refresh();
   }
 
-  function toggleReaction(reviewId, emoji) {
-    setReviews((rs) =>
-      rs.map((r) => {
-        if (r.id !== reviewId) return r;
-        const existingIdx = r.reactions.findIndex(
-          (x) => x.userId === currentUser && x.emoji === emoji
-        );
-        let reactions;
-        if (existingIdx >= 0) {
-          reactions = r.reactions.filter((_, i) => i !== existingIdx);
-        } else {
-          reactions = [...r.reactions, { userId: currentUser, emoji }];
-        }
-        return { ...r, reactions };
-      })
-    );
+  async function toggleReaction(reviewId, emoji) {
+    const review = reviews.find((r) => r.id === reviewId);
+    const already = Boolean(review?.reactions.some((x) => x.userId === currentUser && x.emoji === emoji));
+    await api.toggleReviewReaction(reviewId, currentUser, emoji, already);
+    await refresh();
   }
 
-  function toggleAnswerReaction(reviewId, chapterId, emoji) {
-    setReviews((rs) =>
-      rs.map((r) => {
-        if (r.id !== reviewId) return r;
-        const answers = r.answers.map((a) => {
-          if (a.chapterId !== chapterId) return a;
-          const existingIdx = a.reactions.findIndex(
-            (x) => x.userId === currentUser && x.emoji === emoji
-          );
-          let reactions;
-          if (existingIdx >= 0) {
-            reactions = a.reactions.filter((_, i) => i !== existingIdx);
-          } else {
-            reactions = [...a.reactions, { userId: currentUser, emoji }];
-          }
-          return { ...a, reactions };
-        });
-        return { ...r, answers };
-      })
-    );
+  async function toggleAnswerReaction(reviewId, chapterId, emoji) {
+    const review = reviews.find((r) => r.id === reviewId);
+    const answer = review?.answers.find((a) => a.chapterId === chapterId);
+    if (!answer) return;
+    const already = answer.reactions.some((x) => x.userId === currentUser && x.emoji === emoji);
+    await api.toggleAnswerReaction(answer.id, currentUser, emoji, already);
+    await refresh();
   }
 
-  function addComment(reviewId, text) {
+  async function addComment(reviewId, text) {
     if (!text.trim()) return;
-    setReviews((rs) =>
-      rs.map((r) =>
-        r.id === reviewId
-          ? {
-              ...r,
-              comments: [...r.comments, { userId: currentUser, text: text.trim(), date: formDate }],
-            }
-          : r
-      )
-    );
+    await api.addComment(reviewId, currentUser, text.trim());
+    await refresh();
   }
 
   const canView = (endChapterId) => {
@@ -449,12 +342,28 @@ export default function App() {
     return flat.sort((a, b) => chapterIndex(a.chapterId) - chapterIndex(b.chapterId));
   }, [reviews, valueShiftMember, currentUser, progress]);
 
+  // ---------- 読み込み中 ----------
+  if (loading) {
+    return (
+      <div className="app-shell login-shell">
+        <style>{GLOBAL_CSS}</style>
+        <div className="login-card">
+          <div className="login-emblem">🔖</div>
+          <p className="app-name-eyebrow">{APP_NAME}</p>
+          <p className="login-sub">読み込み中…</p>
+          {syncError && <div className="sync-error-banner">{syncError}</div>}
+        </div>
+      </div>
+    );
+  }
+
   // ---------- ログイン画面 ----------
   if (!currentUser) {
     return (
       <div className="app-shell login-shell">
         <style>{GLOBAL_CSS}</style>
         <div className="login-card">
+          {syncError && <div className="sync-error-banner">{syncError}</div>}
           <div className="login-emblem">🔖</div>
           <p className="app-name-eyebrow">{APP_NAME}</p>
           <h1 className="login-book-title">『{BOOK.title}』</h1>
@@ -539,6 +448,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <style>{GLOBAL_CSS}</style>
+      {syncError && <div className="sync-error-banner sync-error-banner-main">{syncError}</div>}
 
       <header className="app-header">
         <div className="header-left">
@@ -1280,6 +1190,21 @@ const GLOBAL_CSS = `
   color: var(--ink);
   display: flex;
   flex-direction: column;
+}
+
+.sync-error-banner {
+  background: #FBEDE9;
+  border: 1px solid var(--vermilion);
+  color: var(--vermilion);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  margin-bottom: 16px;
+  text-align: left;
+}
+.sync-error-banner-main {
+  margin: 12px 14px 0;
 }
 
 /* ---------- ログイン画面 ---------- */
