@@ -544,7 +544,6 @@ export default function App() {
             formDate={formDate}
             setFormDate={setFormDate}
             rangeChapterIds={rangeChapterIds}
-            myProgressIndex={myProgressIndex}
             allAnswersFilled={allAnswersFilled}
             submitReview={submitReview}
             editingReviewId={editingReviewId}
@@ -953,17 +952,11 @@ function PostView({
   formDate,
   setFormDate,
   rangeChapterIds,
-  myProgressIndex,
   allAnswersFilled,
   submitReview,
   editingReviewId,
   onCancelEdit,
 }) {
-  // 編集時は、元々選んでいた終了章も選択可能上限に含める
-  // （編集中に他の投稿で進捗が変わっていても、自分の編集対象の範囲は保持できるように）
-  const baseMax = Math.min(myProgressIndex + 1, BOOK.chapters.length - 1);
-  const maxSelectable = editingReviewId ? Math.max(baseMax, formEndIndex) : baseMax;
-
   function handleStartChange(v) {
     const idx = Number(v);
     setFormStartIndex(idx);
@@ -988,9 +981,8 @@ function PostView({
             <label className="field-label">開始章</label>
             <select className="text-input" value={formStartIndex} onChange={(e) => handleStartChange(e.target.value)}>
               {BOOK.chapters.map((c, i) => (
-                <option key={c.id} value={i} disabled={i > maxSelectable}>
+                <option key={c.id} value={i}>
                   {c.part}・{c.label}
-                  {i > maxSelectable ? "（未読）" : ""}
                 </option>
               ))}
             </select>
@@ -1003,9 +995,8 @@ function PostView({
               onChange={(e) => setFormEndIndex(Number(e.target.value))}
             >
               {BOOK.chapters.map((c, i) => (
-                <option key={c.id} value={i} disabled={i > maxSelectable || i < formStartIndex}>
+                <option key={c.id} value={i} disabled={i < formStartIndex}>
                   {c.part}・{c.label}
-                  {i > maxSelectable ? "（未読）" : ""}
                 </option>
               ))}
             </select>
